@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+build/
+dist/
+*.spec
+* - INDEX.nc
+* - MANUSCRIPT.nc
+project_settings.ini
