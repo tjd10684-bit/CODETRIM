@@ -3,24 +3,47 @@ from pathlib import Path
 import re
 
 
-def strip_nc_comments(line):
-    visible = []
+def nc_comment_spans(line):
     comment_depth = 0
+    start = None
 
-    for character in line:
+    for index, character in enumerate(line):
         if character == ";" and comment_depth == 0:
-            break
+            yield index, len(line)
+            return
         if character == "(":
+            if comment_depth == 0:
+                start = index
             comment_depth += 1
         elif character == ")" and comment_depth:
             comment_depth -= 1
-        elif comment_depth == 0:
-            visible.append(character)
+            if comment_depth == 0:
+                yield start, index + 1
+                start = None
+    if start is not None:
+        yield start, len(line)
+
+
+def strip_nc_comments(line):
+    visible = []
+    start = 0
+    for comment_start, comment_end in nc_comment_spans(line):
+        visible.append(line[start:comment_start])
+        start = comment_end
+    visible.append(line[start:])
 
     return "".join(visible)
 
 
 _CODE_TEXT_PATTERN = re.compile(r"\s*([A-Za-z])0*(\d+)\s*")
+_WORD_PATTERN = re.compile(
+    r"(?<![A-Za-z_])([A-Za-z])\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+))",
+    re.ASCII,
+)
+
+
+def iter_nc_words(text):
+    return _WORD_PATTERN.finditer(text)
 
 
 @lru_cache(maxsize=None)

@@ -8,4 +8,6 @@ dist/
 *.spec
 * - INDEX.nc
 * - MANUSCRIPT.nc
+* - INDEX.pdf
+* - MANUSCRIPT.pdf
 project_settings.ini

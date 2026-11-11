@@ -1,3 +1,4 @@
+import configparser
 import tempfile
 import unittest
 from pathlib import Path
@@ -225,6 +226,50 @@ class GeneratorTests(unittest.TestCase):
 
 
 class ProjectSettingsTests(unittest.TestCase):
+    def test_loads_legacy_unindented_multiline_notes(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            input_file = Path(temporary_directory) / "program.nc"
+            settings_file = input_file.parent / "project_settings.ini"
+            settings_file.write_text(
+                "# Mastercam Tools Project Settings\n"
+                "# Automatically created by Mastercam Tools.\n"
+                "\n[Project]\n"
+                "Customer=Customer\nPartNumber=Part\n"
+                "Notes=first line\nsecond: 100% = ok\n"
+                "# note, not a comment\n[also a note]\n\nlast line\n",
+                encoding="utf-8",
+            )
+            values = load_project_settings(input_file)
+            self.assertEqual(values, {
+                "customer": "Customer",
+                "part_number": "Part",
+                "notes": "first line\nsecond: 100% = ok\n"
+                         "# note, not a comment\n[also a note]\n\nlast line",
+            })
+            save_project_settings(input_file, **values)
+            self.assertEqual(load_project_settings(input_file), values)
+
+    def test_legacy_empty_first_note_line_and_trailing_blank_line(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            input_file = Path(temporary_directory) / "program.nc"
+            (input_file.parent / "project_settings.ini").write_text(
+                "# Mastercam Tools Project Settings\n"
+                "[Project]\nCustomer=Customer\nPartNumber=Part\n"
+                "Notes=\nsecond line\n\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(load_project_settings(input_file)["notes"], "\nsecond line\n")
+
+    def test_malformed_nonlegacy_settings_still_raise(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            input_file = Path(temporary_directory) / "program.nc"
+            (input_file.parent / "project_settings.ini").write_text(
+                "[Project]\nCustomer=Customer\ninvalid line\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(configparser.ParsingError):
+                load_project_settings(input_file)
+
     def test_settings_round_trip_preserves_special_and_multiline_values(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             input_file = Path(temporary_directory) / "program.nc"
@@ -235,6 +280,13 @@ class ProjectSettingsTests(unittest.TestCase):
             }
             save_project_settings(input_file, **values)
             self.assertEqual(load_project_settings(input_file), values)
+
+    def test_settings_round_trip_preserves_whitespace_and_comment_lines(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            input_file = Path(temporary_directory) / "program.nc"
+            notes = "  first line  \n# note\n; another note\n\nlast line\n"
+            save_project_settings(input_file, "Customer", "Part", notes)
+            self.assertEqual(load_project_settings(input_file)["notes"], notes)
 
     def test_missing_settings_returns_empty_defaults(self):
         with tempfile.TemporaryDirectory() as temporary_directory:

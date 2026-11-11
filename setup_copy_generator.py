@@ -1,9 +1,19 @@
-from pathlib import Path
-
 from nc_commands import has_m_code, has_search_code, read_nc_lines
+from output_document import OutputDocument, write_text_output
 
 
 def generate_manuscript_text(
+        input_file,
+        m06_lines_after,
+        m01_surrounding_lines,
+        search_code="M01"
+):
+    return generate_manuscript_document(
+        input_file, m06_lines_after, m01_surrounding_lines, search_code
+    )[0]
+
+
+def generate_manuscript_document(
         input_file,
         m06_lines_after,
         m01_surrounding_lines,
@@ -13,7 +23,7 @@ def generate_manuscript_text(
     _validate_line_counts(m06_lines_after, m01_surrounding_lines)
     lines = read_nc_lines(input_file)
 
-    output = []
+    output = OutputDocument()
 
     # First M06 Section
 
@@ -31,7 +41,7 @@ def generate_manuscript_text(
             m06_end = end
 
             for x in range(0, end):
-                output.append(lines[x])
+                output.append(lines[x], x)
 
             output.append("")
             output.append("(CODE REMOVED)")
@@ -106,7 +116,7 @@ def generate_manuscript_text(
             output.append("")
 
         for x in range(start, end):
-            output.append(lines[x])
+            output.append(lines[x], x)
 
         first_block = False
         last_output_end = end
@@ -134,11 +144,11 @@ def generate_manuscript_text(
                 output.append("")
 
                 for x in range(start, len(lines)):
-                    output.append(lines[x])
+                    output.append(lines[x], x)
 
             break
 
-    return "\n".join(output)
+    return output.result()
 
 
 def _validate_line_counts(*values):
@@ -160,13 +170,4 @@ def create_manuscript(
         search_code
     )
 
-    input_path = Path(input_file)
-
-    output_file = (
-        input_path.parent /
-        f"{input_path.stem} - MANUSCRIPT.nc"
-    )
-
-    output_file.write_text(manuscript_text, encoding="utf-8", newline="\n")
-
-    return output_file
+    return write_text_output(input_file, "MANUSCRIPT", manuscript_text)

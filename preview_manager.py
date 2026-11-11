@@ -1,5 +1,13 @@
-from index_generator import generate_index_text
-from setup_copy_generator import generate_manuscript_text
+from index_generator import generate_index_document, generate_index_text
+from setup_copy_generator import generate_manuscript_document, generate_manuscript_text
+
+
+def get_index_document(*args, **kwargs):
+    return generate_index_document(*args, **kwargs)
+
+
+def get_manuscript_document(*args, **kwargs):
+    return generate_manuscript_document(*args, **kwargs)
 
 
 def get_index_preview(

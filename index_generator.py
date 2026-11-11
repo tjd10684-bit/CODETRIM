@@ -1,6 +1,20 @@
 from pathlib import Path
 
 from nc_commands import has_m_code, has_search_code, read_nc_lines
+from output_document import OutputDocument, write_text_output
+
+
+INDEX_SEPARATOR = "-" * 58
+
+
+def index_header_lines(input_file, customer, part_number, notes):
+    return [
+        "INDEX",
+        f"CUSTOMER: {customer}",
+        f"PART NUMBER: {part_number}",
+        f"PROGRAM NUMBER: {Path(input_file).stem}",
+        f"NOTES: {notes}",
+    ]
 
 
 def generate_index_text(
@@ -13,22 +27,33 @@ def generate_index_text(
     notes,
     search_code="M01"
 ):
+    return generate_index_document(
+        input_file, m06_lines_before, m01_lines_before, m01_lines_after,
+        customer, part_number, notes, search_code
+    )[0]
+
+
+def generate_index_document(
+    input_file,
+    m06_lines_before,
+    m01_lines_before,
+    m01_lines_after,
+    customer,
+    part_number,
+    notes,
+    search_code="M01",
+):
 
     _validate_line_counts(m06_lines_before, m01_lines_before, m01_lines_after)
     lines = read_nc_lines(input_file)
 
-    input_path = Path(input_file)
-
-    output = []
+    output = OutputDocument()
 
     # Header
 
-    output.append("INDEX")
-    output.append(f"CUSTOMER: {customer}")
-    output.append(f"PART NUMBER: {part_number}")
-    output.append(f"PROGRAM NUMBER: {input_path.stem}")
-    output.append(f"NOTES: {notes}")
-    output.append("-" * 58)
+    for line in index_header_lines(input_file, customer, part_number, notes):
+        output.append(line)
+    output.append(INDEX_SEPARATOR)
     output.append("")
 
     # First Operation (First M06)
@@ -43,7 +68,7 @@ def generate_index_text(
             )
 
             for x in range(start, i + 1):
-                output.append(lines[x])
+                output.append(lines[x], x)
 
             output.append("")
             break
@@ -65,11 +90,11 @@ def generate_index_text(
             )
 
             for x in range(start, end):
-                output.append(lines[x])
+                output.append(lines[x], x)
 
             output.append("")
 
-    return "\n".join(output)
+    return output.result()
 
 
 def _validate_line_counts(*values):
@@ -99,13 +124,4 @@ def create_index(
         search_code
     )
 
-    input_path = Path(input_file)
-
-    output_file = (
-        input_path.parent /
-        f"{input_path.stem} - INDEX.nc"
-    )
-
-    output_file.write_text(index_text, encoding="utf-8", newline="\n")
-
-    return output_file
+    return write_text_output(input_file, "INDEX", index_text)
