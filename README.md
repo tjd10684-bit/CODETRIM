@@ -56,9 +56,9 @@ files are saved alongside the program as `<program> - INDEX` and
 Both previews use G-code syntax colors: comments are green; rapid moves and
 Z/W/K words are red; feed moves are teal; X/I words are blue; and Y/J words
 are orange. M-codes, tool words, and feed/spindle values have their own colors.
-Colors adjust for the preview background. Highlighted group lines use black
-or white text instead of syntax colors for readability. PDF colors are adapted
-to a white page; optional NC files remain unchanged plain text.
+Colors adjust for the preview background. Grouped lines retain their normal
+syntax colors, with numbered color bubbles in a separate left gutter. PDF colors
+are adapted to a white page; optional NC files remain unchanged plain text.
 
 ## Highlight groups
 
@@ -67,15 +67,17 @@ from a high-contrast color palette. Each palette color has at least a 7:1
 contrast ratio with its black or white text.
 Click a G-code line in either preview to select it; Ctrl-click toggles
 individual lines and Shift-click selects a range of visible lines. Choose a
-group and click **Assign Selected**. A line belongs to one group at a time,
-and its text is highlighted wherever that source line occurs in either preview
-or PDF. The space after the text stays uncolored for handwritten notes.
+group and click **Assign Selected**. A line belongs to one group at a time.
+A numbered color bubble with a bold number appears beside that line in either
+preview or PDF; the line itself remains uncolored for readability and
+handwritten notes.
 Groups can be edited or deleted, and selected lines can be unassigned.
-The index preview and index PDF include a horizontal color key listing only
-groups used in that index. In the PDF, the key sits beside the header when it
-fits; if the header is too wide or the key is too tall, it moves below the
-header separator and before the G-code. Names wrap onto additional rows as
-needed. The manuscript has no key, and text-only output remains unchanged.
+The index preview and index PDF include a five-column color key below the
+header, listing every group with an assigned line, including lines appearing
+only in the manuscript. Group numbers are assigned sequentially in group order
+and match between both outputs. Names wrap within their columns and additional
+groups add rows. The key uses 1.5-line spacing and ends with a separator before
+the G-code. The manuscript has no key, and text-only output remains unchanged.
 
 ### Suggested groups
 
@@ -86,12 +88,12 @@ for metric programs), the same known work offset, and matching programmed
 rotary values. Unprogrammed rotary positions remain unknown.
 The review lists each operation, its marker line, tool, and programmed
 coordinates. Accepting a suggestion lets you name it and choose a color; it
-highlights the selected `M01` markers (or `M06` where no `M01` precedes an
-operation) without changing the G-code. Uncheck operations that do not belong
-before accepting; at least two operations must remain. Existing marker
-assignments are never overwritten. Each operation appears in at most one
-suggestion, and every pair within that suggestion satisfies the tolerance;
-ambiguous alternatives may therefore not all be suggested.
+adds numbered bubbles beside the selected `M01` markers (or `M06` where no
+`M01` precedes an operation) without changing the G-code. Uncheck operations
+that do not belong before accepting; at least two operations must remain.
+Existing marker assignments are never overwritten. Each operation appears in
+at most one suggestion, and every pair within that suggestion satisfies the
+tolerance; ambiguous alternatives may therefore not all be suggested.
 
 The analysis recognizes G73 and G81-G89 canned cycles in the G17 plane, tracks
 modal X/Y positions and G90/G91 movement, and skips operations it cannot

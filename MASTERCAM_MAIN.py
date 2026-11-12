@@ -4,9 +4,9 @@ import sys
 import uuid
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, Qt, Signal
+from PySide6.QtCore import QEvent, QRectF, Qt, Signal
 from PySide6.QtGui import (
-    QColor, QIcon, QKeySequence, QPalette, QPixmap, QShortcut, QTextCharFormat, QTextCursor,
+    QColor, QFontDatabase, QIcon, QKeySequence, QPainter, QPalette, QPixmap, QShortcut, QTextCursor,
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -37,6 +37,7 @@ from color_utils import contrasting_text_color
 from find_dialog import FindDialog
 from gcode_highlighter import GCodeHighlighter
 from group_palette import GROUP_COLOR_VALUES, choose_group_color, nearest_group_color
+from group_markers import assigned_markers, key_rows, marker_width, paint_marker
 from group_suggestions import analyze_group_suggestions
 from highlight_groups import (
     HighlightGroup,
@@ -45,7 +46,7 @@ from highlight_groups import (
     source_hash,
 )
 from nc_commands import count_search_code, read_nc_lines
-from index_generator import index_header_lines
+from index_generator import INDEX_SEPARATOR, index_header_lines
 from output_document import write_text_output
 from pdf_export import create_pdf
 from preview_manager import get_index_document, get_manuscript_document
@@ -81,7 +82,51 @@ class PreviewEdit(QPlainTextEdit):
 
     def __init__(self):
         super().__init__()
+        self.setFont(QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont))
+        self._markers = {}
+        self._key_markers = {}
+        self._sources = []
+        self._gutter = PreviewGutter(self)
+        self.updateRequest.connect(self.update_gutter)
         self.syntax_highlighter = GCodeHighlighter(self.document())
+
+    def set_markers(self, sources, markers, key_markers=None):
+        self._sources = sources
+        self._markers = markers
+        self._key_markers = key_markers or {}
+        count = max((marker.number for marker in markers.values()), default=0)
+        width = int(marker_width(self.font(), self, count) + 4)
+        self.setViewportMargins(width, 0, 0, 0)
+        self._gutter.setGeometry(0, self.contentsRect().top(), width, self.contentsRect().height())
+        self._gutter.update()
+        self.viewport().update()
+
+    def update_gutter(self, rect, dy):
+        if dy:
+            self._gutter.scroll(0, dy)
+        else:
+            self._gutter.update(0, rect.y(), self._gutter.width(), rect.height())
+        self.viewport().update()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._gutter.setGeometry(0, self.contentsRect().top(), self._gutter.width(), self.contentsRect().height())
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QPainter(self.viewport())
+        block = self.firstVisibleBlock()
+        while block.isValid():
+            top = self.blockBoundingGeometry(block).translated(self.contentOffset()).top()
+            if top > event.rect().bottom():
+                break
+            for column, marker in self._key_markers.get(block.blockNumber(), []):
+                cursor = QTextCursor(block)
+                cursor.setPosition(block.position() + len(block.text()[:column].encode("utf-16-le")) // 2)
+                rect = self.cursorRect(cursor)
+                width = marker_width(self.font(), self, marker.number)
+                paint_marker(painter, QRectF(rect.x(), rect.y(), width, rect.height()), marker, self.font())
+            block = block.next()
 
     def changeEvent(self, event):
         super().changeEvent(event)
@@ -95,11 +140,25 @@ class PreviewEdit(QPlainTextEdit):
             self.line_clicked.emit(block, event.modifiers().value)
 
 
-def groups_in_document(state, sources):
-    if state is None:
-        return []
-    used = {state.assignments.get(source) for source in sources if source is not None}
-    return [group for group in state.groups if group.id in used]
+class PreviewGutter(QWidget):
+    def __init__(self, preview):
+        super().__init__(preview)
+        self.preview = preview
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        block = self.preview.firstVisibleBlock()
+        while block.isValid():
+            top = self.preview.blockBoundingGeometry(block).translated(self.preview.contentOffset()).top()
+            height = self.preview.blockBoundingRect(block).height()
+            if top > event.rect().bottom():
+                break
+            number = block.blockNumber()
+            source = self.preview._sources[number] if number < len(self.preview._sources) else None
+            marker = self.preview._markers.get(source)
+            if marker is not None:
+                paint_marker(painter, QRectF(1, top, self.width() - 3, min(height, self.preview.fontMetrics().height())), marker, self.preview.font())
+            block = block.next()
 
 
 class MainWindow(QMainWindow):
@@ -233,21 +292,7 @@ class MainWindow(QMainWindow):
         for preview in (self.index_preview, self.manuscript_preview):
             preview.setReadOnly(True)
             preview.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
-        index_panel = QWidget()
-        index_layout = QHBoxLayout(index_panel)
-        index_layout.setContentsMargins(0, 0, 0, 0)
-        index_layout.addWidget(self.index_preview, 1)
-        self.index_legend = QGroupBox("Group Index")
-        self.index_legend.setFixedWidth(190)
-        legend_layout = QVBoxLayout(self.index_legend)
-        self.index_legend_text = QTextEdit()
-        self.index_legend_text.setReadOnly(True)
-        self.index_legend_text.setMaximumHeight(180)
-        self.index_legend_text.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
-        legend_layout.addWidget(self.index_legend_text)
-        index_layout.addWidget(self.index_legend, alignment=Qt.AlignmentFlag.AlignTop)
-        self.index_legend.hide()
-        self.preview_tabs.addTab(index_panel, "Index Preview")
+        self.preview_tabs.addTab(self.index_preview, "Index Preview")
         self.preview_tabs.addTab(self.manuscript_preview, "Manuscript Preview")
         preview_layout.addWidget(self.preview_tabs, 1)
         self.find_dialog = FindDialog(self, self.current_preview)
@@ -402,6 +447,8 @@ class MainWindow(QMainWindow):
         if not self.file_entry.text().strip():
             self.index_preview.clear()
             self.manuscript_preview.clear()
+            self.index_preview.set_markers([], {})
+            self.manuscript_preview.set_markers([], {})
             self.preview_status.setText("Select a program file to preview.")
             self.search_count.clear()
             self._group_key = None
@@ -437,6 +484,7 @@ class MainWindow(QMainWindow):
             count = count_search_code(lines, code)
         except (OSError, UnicodeError, ValueError) as error:
             preview.clear()
+            preview.set_markers([], {})
             self.search_count.clear()
             self.preview_status.setText(f"Preview error: {error}")
             self._group_key = None
@@ -446,11 +494,39 @@ class MainWindow(QMainWindow):
             return
 
         self.load_groups_if_needed(input_file, lines)
+        markers, groups = assigned_markers(self._group_state)
+        key_positions = {}
+        if preview is self.index_preview and groups:
+            parts = content.split("\n")
+            separator = sum(
+                line.count("\n") + 1
+                for line in index_header_lines(input_file, self.customer_entry.text(), self.part_number_entry.text(), self.notes_text.toPlainText())
+            )
+            if separator >= len(parts) or parts[separator] != INDEX_SEPARATOR:
+                raise ValueError("Index header separator was not found.")
+            rows, positions = key_rows(groups, 22, self.index_preview.fontMetrics())
+            spaced_rows = [line for row in rows for line in (row, "")]
+            inserted = ["GROUP INDEX", *spaced_rows, INDEX_SEPARATOR, ""]
+            parts[separator + 1:separator + 1] = inserted
+            sources[separator + 1:separator + 1] = [None] * len(inserted)
+            content = "\n".join(parts)
+            key_positions = {separator + 2 + row * 2: value for row, value in positions.items()}
         self._preview_sources[preview] = sources
         preview.setPlainText(content)
+        if preview is self.index_preview and groups:
+            font = preview.font()
+            if font.pointSizeF() > 0:
+                font.setPointSizeF(font.pointSizeF() / 2)
+            elif font.pixelSize() > 0:
+                font.setPixelSize(max(1, round(font.pixelSize() / 2)))
+            for row in range(len(rows)):
+                spacer = preview.document().findBlockByNumber(separator + 3 + row * 2)
+                cursor = QTextCursor(spacer)
+                text_format = cursor.blockCharFormat()
+                text_format.setFont(font)
+                cursor.setBlockCharFormat(text_format)
+        preview.set_markers(sources, markers, key_positions)
         self.highlight_preview()
-        if preview is self.index_preview:
-            self.refresh_index_legend()
         self.preview_status.clear()
         found = "match" if count == 1 else "matches"
         self.search_count.setText(f"{count} {code} {found} found")
@@ -534,23 +610,6 @@ class MainWindow(QMainWindow):
         )
         self.unmatched_list.setVisible(bool(unmatched))
         self.discard_unmatched_button.setVisible(bool(unmatched))
-        self.refresh_index_legend()
-
-    def refresh_index_legend(self):
-        groups = groups_in_document(
-            self._group_state, self._preview_sources.get(self.index_preview, [])
-        )
-        self.index_legend.setVisible(bool(groups))
-        self.index_legend_text.clear()
-        cursor = self.index_legend_text.textCursor()
-        for index, group in enumerate(groups):
-            if index:
-                cursor.insertText("   ", QTextCharFormat())
-            text_format = QTextCharFormat()
-            color = QColor(group.color)
-            text_format.setBackground(color)
-            text_format.setForeground(contrasting_text_color(color))
-            cursor.insertText(group.name, text_format)
 
     def current_preview(self):
         return self.index_preview if self.preview_tabs.currentIndex() == 0 else self.manuscript_preview
@@ -601,8 +660,6 @@ class MainWindow(QMainWindow):
         preview = self.current_preview()
         sources = self._preview_sources.get(preview, [])
         state = self._group_state
-        colors = {group.id: QColor(group.color) for group in state.groups} if state else {}
-        assignments = state.assignments if state else {}
         preview.syntax_highlighter.set_context(
             sources,
             preview.palette().color(QPalette.ColorRole.Base),
@@ -612,25 +669,20 @@ class MainWindow(QMainWindow):
         while block.isValid():
             number = block.blockNumber()
             source = sources[number] if number < len(sources) else None
-            color = colors.get(assignments.get(source))
             selected = source is not None and source in self._selected_lines
-            if color is not None or selected:
+            if selected:
                 selection = QTextEdit.ExtraSelection()
                 selection.cursor = preview.textCursor()
                 selection.cursor.setPosition(block.position())
                 selection.cursor.movePosition(
                     QTextCursor.MoveOperation.EndOfBlock, QTextCursor.MoveMode.KeepAnchor
                 )
-                if color is not None:
-                    selection.format.setBackground(color)
-                    selection.format.setForeground(contrasting_text_color(color))
                 if selected:
                     selection.format.setFontWeight(700)
                     selection.format.setFontUnderline(True)
-                    if color is None:
-                        background = self.palette().highlight().color()
-                        selection.format.setBackground(background)
-                        selection.format.setForeground(contrasting_text_color(background))
+                    background = self.palette().highlight().color()
+                    selection.format.setBackground(background)
+                    selection.format.setForeground(contrasting_text_color(background))
                 selections.append(selection)
             block = block.next()
         preview.setExtraSelections(selections)
@@ -644,7 +696,7 @@ class MainWindow(QMainWindow):
             return False
         self._group_state = state
         self.refresh_group_controls()
-        self.highlight_preview()
+        self.update_preview()
         return True
 
     def group_details(self, group=None, parent=None, default_name=""):
@@ -837,30 +889,25 @@ class MainWindow(QMainWindow):
                 raise ValueError("The program changed while preparing the outputs. Try again.")
 
             group_colors = {}
+            groups = []
             if output_format in ("pdf", "both"):
                 self.load_groups_if_needed(input_file, lines)
                 if self._group_state is None:
                     raise ValueError("Highlight groups could not be loaded; PDF output was not generated.")
-                colors = {group.id: group.color for group in self._group_state.groups}
-                group_colors = {
-                    line: colors[group_id]
-                    for line, group_id in self._group_state.assignments.items()
-                }
+                group_colors, groups = assigned_markers(self._group_state)
 
             save_project_settings(input_file, customer, part_number, notes)
             created_files = []
             for label, text, sources in documents:
                 if output_format in ("pdf", "both"):
                     if label == "INDEX":
-                        groups = groups_in_document(self._group_state, sources)
-                        legend = [(group.name, group.color) for group in groups]
                         header_count = sum(
                             line.count("\n") + 1
                             for line in index_header_lines(input_file, customer, part_number, notes)
                         )
                         created_files.append(str(create_pdf(
                             input_file, label, text, sources, group_colors,
-                            legend=legend, header_line_count=header_count,
+                            legend=groups, header_line_count=header_count,
                         )))
                     else:
                         created_files.append(str(create_pdf(input_file, label, text, sources, group_colors)))

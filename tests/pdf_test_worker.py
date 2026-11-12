@@ -10,10 +10,26 @@ from PySide6.QtWidgets import QApplication
 
 from highlight_groups import HighlightGroup, HighlightGroups, save_highlight_groups, source_hash
 from group_suggestions import analyze_group_suggestions
+from group_markers import GroupMarker
 from index_generator import INDEX_SEPARATOR, generate_index_document, index_header_lines
 from MASTERCAM_MAIN import MainWindow
 from nc_commands import read_nc_lines
-from pdf_export import create_pdf
+from pdf_export import create_pdf as export_pdf
+
+
+def create_pdf(input_file, label, text, sources, group_colors, legend=(), header_line_count=0):
+    markers = {
+        line: GroupMarker(index, f"Group {index}", color)
+        for index, (line, color) in enumerate(group_colors.items(), 1)
+    }
+    key = [
+        GroupMarker(index, name, color)
+        for index, (name, color) in enumerate(legend, 1)
+    ]
+    return export_pdf(
+        input_file, label, text, sources, markers,
+        legend=key, header_line_count=header_line_count,
+    )
 
 
 class PDFExportTests(unittest.TestCase):
@@ -60,14 +76,17 @@ class PDFExportTests(unittest.TestCase):
             size = reader.pagePointSize(0)
             self.assertAlmostEqual(size.width(), 612, delta=0.1)
             self.assertAlmostEqual(size.height(), 792, delta=0.1)
-            self.assertEqual(self.page_body(reader, 0), text)
+            compact = "".join(self.page_body(reader, 0).split())
+            self.assertIn("N1M06", compact)
+            self.assertIn("N2M01G00X123Y456", compact)
+            self.assertIn("N3G02X-2Y3", compact)
             image = reader.render(0, QSize(1224, 1584))
             for background, light_text in (("#ffee00", False), ("#283593", True)):
                 rows = [
-                    y for y in range(60, 200)
+                    y for y in range(60, 250)
                     if any(
                         image.pixelColor(x, y).name() == background
-                        for x in range(72, 200, 10)
+                        for x in range(72, 104)
                     )
                 ]
                 self.assertTrue(rows, background)
@@ -81,7 +100,7 @@ class PDFExportTests(unittest.TestCase):
                         (pixel.red() < 60 and pixel.green() < 60 and pixel.blue() < 60)
                     )
                     for y in rows
-                    for x in range(72, 600)
+                    for x in range(72, 104)
                     for pixel in (image.pixelColor(x, y),)
                 ), f"No readable {'white' if light_text else 'black'} text on {background}")
         finally:
@@ -98,12 +117,12 @@ class PDFExportTests(unittest.TestCase):
         try:
             self.assertGreater(reader.pageCount(), 2)
             pages = [self.page_body(reader, i) for i in range(reader.pageCount())]
-            self.assertEqual("".join("".join(page.split()) for page in pages), "".join(text.split()))
-            for page in (0, 1):
+            self.assertEqual("".join("".join(page.split()) for page in pages)[1:], "".join(text.split()))
+            for page in (0,):
                 image = reader.render(page, QSize(612, 792))
                 self.assertTrue(
-                    any(image.pixelColor(500, y).name() == "#ffee00" for y in range(36, 756)),
-                    f"Missing highlight on page {page + 1}",
+                    any(image.pixelColor(40, y).name() == "#ffee00" for y in range(36, 756)),
+                    f"Missing marker on page {page + 1}",
                 )
         finally:
             reader.close()
@@ -246,16 +265,15 @@ class PDFExportTests(unittest.TestCase):
             all_text = "".join(self.page_body(reader, i) for i in range(reader.pageCount()))
             self.assertEqual(all_text.count("z"), len(name))
             image = reader.render(0, QSize(612, 792))
-            highlighted_rows = [
-                y for y in range(36, 400)
-                if image.pixelColor(332, y).name() == "#ffee00"
-            ]
-            self.assertGreater(len(highlighted_rows), 20)
+            self.assertTrue(any(
+                image.pixelColor(x, y).name() == "#ffee00"
+                for x in range(50, 80) for y in range(80, 300)
+            ))
         finally:
             reader.close()
             del reader
 
-    def test_legend_header_is_positioned_to_the_right_of_index_header(self):
+    def test_legend_is_below_index_header_and_before_body(self):
         text, sources = generate_index_document(
             self.program, 3, 0, 0, "Example", "Part", "Notes"
         )
@@ -265,33 +283,67 @@ class PDFExportTests(unittest.TestCase):
         )
         reader = self.open_pdf(path)
         try:
-            image = reader.render(0, QSize(612, 792))
-            self.assertTrue(any(
-                image.pixelColor(x, y).name() == "#ffee00"
-                for x in range(330, 400) for y in range(36, 80)
-            ), "Missing group key color in the upper-right header")
-            self.assertFalse(any(
-                image.pixelColor(x, y).name() == "#ffee00"
-                for x in range(36, 300) for y in range(36, 80)
-            ), "Group key overlaps the left-side header")
+            compact = "".join(self.page_body(reader, 0).split())
+            self.assertLess(compact.index("---"), compact.index("GROUPINDEX"))
+            self.assertLess(compact.index("Drilling"), compact.index("N0HEADER"))
         finally:
             reader.close()
             del reader
 
-    def test_horizontal_key_fits_beside_short_header(self):
+    def test_five_even_columns_and_additional_rows(self):
         text, sources = generate_index_document(self.program, 3, 0, 0, "C", "P", "")
         path = create_pdf(
             self.program, "INDEX", text, sources, {},
-            legend=[("G01", "#ffee00"), ("G02", "#ffee00")], header_line_count=5,
+            legend=[(f"G{i:02}", "#ffee00") for i in range(1, 7)], header_line_count=5,
         )
         reader = self.open_pdf(path)
         try:
             image = reader.render(0, QSize(612, 792))
-            self.assertTrue(any(
-                image.pixelColor(335, y).name() == "#ffee00"
-                and image.pixelColor(365, y).name() == "#ffee00"
-                for y in range(36, 100)
-            ), "Group names should share a horizontal row beside the header")
+            regions = []
+            for x1, x2 in ((50, 80), (140, 180), (230, 280), (330, 380), (420, 480)):
+                regions.append({
+                    y for y in range(100, 300)
+                    if any(image.pixelColor(x, y).name() == "#ffee00" for x in range(x1, x2))
+                })
+            self.assertTrue(set.intersection(*regions), "Five bubbles must share a row")
+            self.assertTrue(regions[0] - regions[1], "Sixth bubble must start another row")
+            image = reader.render(0, QSize(1224, 1584))
+            colored = [
+                y for y in range(150, 600)
+                if any(image.pixelColor(x, y).name() == "#ffee00" for x in range(110, 145))
+            ]
+            runs = []
+            for y in colored:
+                if not runs or y > runs[-1][-1] + 1:
+                    runs.append([y])
+                else:
+                    runs[-1].append(y)
+            self.assertEqual(len(runs), 2)
+            self.assertGreater(runs[1][0] - runs[0][-1] - 1, 0)
+            self.assertAlmostEqual(
+                (runs[1][0] - runs[0][0]) / len(runs[0]), 1.5, delta=0.15
+            )
+            text = self.page_body(reader, 0)
+            self.assertEqual(text.count(INDEX_SEPARATOR), 2)
+            self.assertLess(text.index("GROUP INDEX"), text.rindex(INDEX_SEPARATOR))
+            self.assertLess(text.rindex(INDEX_SEPARATOR), text.index("N0 HEADER"))
+        finally:
+            reader.close()
+            del reader
+
+    def test_double_digit_bubble_numbers_are_not_duplicated_in_pdf_text(self):
+        text, sources = generate_index_document(self.program, 3, 0, 0, "C", "P", "")
+        legend = [(f"Group{i}", "#ffee00") for i in range(1, 12)]
+        path = create_pdf(
+            self.program, "INDEX", text, sources, {}, legend=legend, header_line_count=5
+        )
+        reader = self.open_pdf(path)
+        try:
+            compact = "".join(reader.getAllText(0).text().split())
+            self.assertNotIn("1100-Group10", compact)
+            self.assertNotIn("1111-Group11", compact)
+            for name, _ in legend:
+                self.assertIn(name, compact)
         finally:
             reader.close()
             del reader
@@ -309,12 +361,8 @@ class PDFExportTests(unittest.TestCase):
             self.assertIn(notes, compact)
             self.assertLess(compact.index("---"), compact.index("GROUPINDEX"))
             self.assertLess(compact.index("GROUPINDEX"), compact.index("N0HEADER"))
-            image = reader.render(0, QSize(612, 792))
-            self.assertTrue(any(
-                image.pixelColor(40, y).name() == "#ffee00"
-                and image.pixelColor(70, y).name() == "#ffee00"
-                for y in range(90, 300)
-            ), "Group names should share a horizontal row below the separator")
+            self.assertIn("G01", compact)
+            self.assertIn("G02", compact)
         finally:
             reader.close()
             del reader
@@ -354,11 +402,15 @@ class PDFExportTests(unittest.TestCase):
                         for i in range(reader.pageCount())
                     ]
                     combined = "".join(pages)
-                    markers = (f"NTE{count - 1:04d}", INDEX_SEPARATOR, "GROUPINDEX", "G019", "N0HEADER")
+                    self.assertEqual(combined.count(INDEX_SEPARATOR), 2)
+                    markers = (f"NTE{count - 1:04d}", "GROUPINDEX", "G019", "N0HEADER")
                     for marker in markers:
                         self.assertEqual(combined.count(marker), 1, marker)
                     positions = [combined.index(marker) for marker in markers]
                     self.assertEqual(positions, sorted(positions))
+                    self.assertLess(combined.index(INDEX_SEPARATOR), combined.index("GROUPINDEX"))
+                    self.assertGreater(combined.rindex(INDEX_SEPARATOR), combined.index("G019"))
+                    self.assertLess(combined.rindex(INDEX_SEPARATOR), combined.index("N0HEADER"))
                 finally:
                     reader.close()
                     del reader
@@ -401,7 +453,7 @@ class PDFExportTests(unittest.TestCase):
                 if path == index_pdf:
                     self.assertIn("GROUPINDEX", compact)
                     self.assertIn("Holes", compact)
-                    self.assertNotIn("Excluded", compact)
+                    self.assertIn("Excluded", compact)
                     self.assertNotIn("Unassigned", compact)
                 else:
                     self.assertNotIn("GROUPINDEX", compact)

@@ -10,15 +10,15 @@ from PySide6.QtGui import (
     QPageSize,
     QPainter,
     QPdfWriter,
-    QTextCharFormat,
     QTextCursor,
+    QTextBlockFormat,
     QTextDocument,
     QTextLayout,
     QTextOption,
 )
 
-from color_utils import contrasting_text_color
 from gcode_highlighter import GCodeHighlighter
+from group_markers import key_rows, marker_width, paint_marker
 from index_generator import INDEX_SEPARATOR
 from output_document import output_path
 
@@ -90,86 +90,64 @@ def _write_pdf(file, path, input_file, label, text, sources, group_colors, legen
     option = document.defaultTextOption()
     option.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
     document.setDefaultTextOption(option)
-    document.setPageSize(QSizeF(writer.width(), content_height))
+    count = max((marker.number for marker in group_colors.values()), default=0)
+    gutter_width = marker_width(font, writer, count) + 4
+    content_width = writer.width() - gutter_width
+    document.setPageSize(QSizeF(content_width, content_height))
     document.setPlainText(text)
 
     legend_document = None
-    legend_offset = 0
+    legend_positions = {}
     if legend:
-        width, height = writer.width(), content_height
-        header_width = width * 0.52
+        width, height = content_width, content_height
         separator = document.findBlockByNumber(header_line_count)
         if not separator.isValid() or separator.text() != INDEX_SEPARATOR:
             raise ValueError("PDF group index requires an index header separator.")
 
-        def make_legend(legend_width, start_y=0):
+        def make_legend(start_y):
             result = QTextDocument()
             result.documentLayout().setPaintDevice(writer)
             result.setDefaultFont(font)
             result.setDocumentMargin(0)
             result.setDefaultTextOption(option)
-            result.setPageSize(QSizeF(legend_width, height))
+            result.setPageSize(QSizeF(width, height))
             cursor = QTextCursor(result)
-            if start_y:
-                cursor.insertBlock()
+            cursor.insertBlock()
             cursor.insertText("GROUP INDEX")
             cursor.insertBlock()
-            for number, (name, color) in enumerate(legend):
-                if number:
-                    cursor.insertText("   ", QTextCharFormat())
-                text_format = QTextCharFormat()
-                background = QColor(color)
-                text_format.setBackground(background)
-                text_format.setForeground(contrasting_text_color(background))
-                cursor.insertText(name, text_format)
-            if start_y:
-                spacer = result.firstBlock()
-                title = spacer.next()
-                initial_top = result.documentLayout().blockBoundingRect(title).top()
-                cursor = QTextCursor(spacer)
-                block_format = cursor.blockFormat()
-                # Qt scales vertical block margins from 96-DPI units to the paint device.
-                block_format.setBottomMargin(max(0, start_y - initial_top) * 96 / writer.resolution())
-                cursor.setBlockFormat(block_format)
+            cell_width = max(8, int(width / (5 * QFontMetricsF(font, writer).horizontalAdvance("0"))))
+            rows, positions = key_rows(legend, cell_width, QFontMetricsF(font, writer))
+            cursor.insertText("\n".join(rows))
+            cursor.insertBlock()
+            cursor.insertText(INDEX_SEPARATOR)
+            for row in range(len(rows)):
+                row_cursor = QTextCursor(result.findBlockByNumber(row + 2))
+                row_format = row_cursor.blockFormat()
+                row_format.setLineHeight(150, QTextBlockFormat.LineHeightTypes.ProportionalHeight.value)
+                row_cursor.setBlockFormat(row_format)
+            spacer = result.firstBlock()
+            title = spacer.next()
+            initial_top = result.documentLayout().blockBoundingRect(title).top()
+            cursor = QTextCursor(spacer)
+            block_format = cursor.blockFormat()
+            block_format.setBottomMargin(max(0, start_y - initial_top) * 96 / writer.resolution())
+            cursor.setBlockFormat(block_format)
+            legend_positions.update({row + 2: items for row, items in positions.items()})
             return result
 
-        document.pageCount()
-        header_too_wide = False
-        for number in range(header_line_count):
-            layout = document.findBlockByNumber(number).layout()
-            if layout.lineCount() > 1 or any(
-                layout.lineAt(index).naturalTextRect().right() > header_width
-                for index in range(layout.lineCount())
-            ):
-                header_too_wide = True
-                break
-
-        side_offset = header_width + 12
-        legend_document = make_legend(width - side_offset)
-        separator_top = document.documentLayout().blockBoundingRect(separator).top()
-        key_too_tall = legend_document.documentLayout().documentSize().height() > separator_top
-        if header_too_wide or key_too_tall:
-            separator_bottom = document.documentLayout().blockBoundingRect(separator).bottom()
-            legend_document = make_legend(width, start_y=separator_bottom)
-            legend_bottom = legend_document.documentLayout().documentSize().height()
-            cursor = QTextCursor(separator)
-            block_format = cursor.blockFormat()
-            spacing = max(0, legend_bottom - separator_bottom) * 96 / writer.resolution()
-            block_format.setBottomMargin(block_format.bottomMargin() + spacing)
-            cursor.setBlockFormat(block_format)
-        else:
-            legend_offset = side_offset
-            for number in range(header_line_count):
-                cursor = QTextCursor(document.findBlockByNumber(number))
-                block_format = cursor.blockFormat()
-                block_format.setRightMargin(width - header_width)
-                cursor.setBlockFormat(block_format)
+        separator_bottom = document.documentLayout().blockBoundingRect(separator).bottom()
+        legend_document = make_legend(separator_bottom)
+        legend_bottom = legend_document.documentLayout().documentSize().height()
+        cursor = QTextCursor(separator)
+        block_format = cursor.blockFormat()
+        spacing = max(0, legend_bottom - separator_bottom) * 96 / writer.resolution()
+        block_format.setBottomMargin(block_format.bottomMargin() + spacing)
+        cursor.setBlockFormat(block_format)
 
     highlighter = GCodeHighlighter(document)
     highlighter.set_context(
         sources,
         QColor("white"),
-        {line: contrasting_text_color(QColor(color)).name() for line, color in group_colors.items()},
     )
     page_count = max(
         1, document.pageCount(),
@@ -178,12 +156,12 @@ def _write_pdf(file, path, input_file, label, text, sources, group_colors, legen
     height = content_height
     page_lines = [[] for _ in range(page_count)]
 
-    def collect_lines(current_document, current_sources, colors, x_offset):
+    def collect_lines(current_document, current_sources, markers, x_offset, key_positions=None):
         block = current_document.firstBlock()
         while block.isValid():
             number = block.blockNumber()
             source = current_sources[number] if number < len(current_sources) else None
-            color = colors.get(source)
+            marker = markers.get(source)
             block_rect = current_document.documentLayout().blockBoundingRect(block)
             text_layout = block.layout()
             for index in range(text_layout.lineCount()):
@@ -198,13 +176,17 @@ def _write_pdf(file, path, input_file, label, text, sources, group_colors, legen
                     line,
                     QPointF(offset_x, offset_y),
                     line.naturalTextRect().translated(offset_x, offset_y),
-                    QColor(color) if color is not None else None,
+                    marker if index == 0 else None,
+                    [(column, item) for column, item in (key_positions or {}).get(number, [])
+                     if line.textStart() <= len(block.text()[:column].encode("utf-16-le")) // 2
+                     < line.textStart() + line.textLength()],
+                    block.text(),
                 ))
             block = block.next()
 
-    collect_lines(document, sources, group_colors, 0)
+    collect_lines(document, sources, group_colors, gutter_width)
     if legend_document is not None:
-        collect_lines(legend_document, (), {}, legend_offset)
+        collect_lines(legend_document, (), {}, gutter_width, legend_positions)
         for lines in page_lines:
             lines.sort(key=lambda item: (item[2].top(), item[2].left()))
 
@@ -221,10 +203,14 @@ def _write_pdf(file, path, input_file, label, text, sources, group_colors, legen
             header.draw(painter, QPointF(0, 0))
             painter.save()
             painter.translate(0, header_band)
-            for line, position, rect, color in page_lines[page]:
-                if color is not None:
-                    painter.fillRect(rect, color)
+            for line, position, rect, marker, key_items, block_text in page_lines[page]:
                 line.draw(painter, position)
+                if marker is not None:
+                    paint_marker(painter, QRectF(0, rect.top(), gutter_width - 4, line.height()), marker, font)
+                for column, item in key_items:
+                    offset = len(block_text[:column].encode("utf-16-le")) // 2
+                    x = line.cursorToX(offset)[0] + position.x()
+                    paint_marker(painter, QRectF(x, rect.top(), marker_width(font, writer, item.number), line.height()), item, font)
             painter.restore()
             painter.setPen(QColor("black"))
             painter.setFont(font)

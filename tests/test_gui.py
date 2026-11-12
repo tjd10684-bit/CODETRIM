@@ -230,7 +230,7 @@ class MainWindowTests(unittest.TestCase):
         dialog.search_entry.setText("M06")
         dialog.find_next()
         self.assertEqual(self.window.index_preview.textCursor().selectedText(), "M06")
-        self.assertEqual(len(self.window.index_preview.extraSelections()), 1)
+        self.assertEqual(len(self.window.index_preview._markers), 1)
         self.assertEqual(self.window.index_preview.toPlainText(), original_preview)
         self.assertEqual(self.program.read_bytes(), original_program)
         self.assertEqual(groups_path(self.program).read_bytes(), original_groups)
@@ -291,9 +291,9 @@ class MainWindowTests(unittest.TestCase):
         self.assertEqual(state.groups[0].name, "Hole Set")
         self.assertEqual(set(state.assignments), {op.marker_index for op in suggestion.operations})
         self.assertEqual(self.program.read_bytes(), original)
-        self.assertEqual(self.window.index_legend_text.toPlainText(), "Hole Set")
+        self.assertIn("Hole Set", self.window.index_preview.toPlainText())
         self.window.preview_tabs.setCurrentIndex(1)
-        self.assertEqual(len(self.window.manuscript_preview.extraSelections()), 2)
+        self.assertEqual(len(self.window.manuscript_preview._markers), 2)
 
     def test_existing_marker_group_is_not_overwritten_by_suggestion(self):
         suggestion = self.suggestion_fixture()
@@ -335,12 +335,12 @@ class MainWindowTests(unittest.TestCase):
         self.assertEqual(self.window._selected_lines, {1, 2})
         self.window.assign_selected()
         self.assertEqual(self.window._selected_lines, set())
-        self.assertEqual(len(self.window.index_preview.extraSelections()), 2)
+        self.assertEqual(len(self.window.index_preview._markers), 2)
 
         self.window.preview_tabs.setCurrentIndex(1)
-        self.assertEqual(len(self.window.manuscript_preview.extraSelections()), 2)
+        self.assertEqual(len(self.window.manuscript_preview._markers), 2)
         self.window.select_file(str(self.program))
-        self.assertEqual(len(self.window.manuscript_preview.extraSelections()), 2)
+        self.assertEqual(len(self.window.manuscript_preview._markers), 2)
         state = load_highlight_groups(self.program, read_nc_lines(self.program))
         self.assertEqual(set(state.assignments), {1, 2})
         self.assertEqual(state.groups[0].name, "Holes")
@@ -348,7 +348,7 @@ class MainWindowTests(unittest.TestCase):
         self.click_source_line(self.window.manuscript_preview, 2)
         self.window.unassign_selected()
         self.window.preview_tabs.setCurrentIndex(0)
-        self.assertEqual(len(self.window.index_preview.extraSelections()), 1)
+        self.assertEqual(len(self.window.index_preview._markers), 1)
 
     def test_grouped_lines_use_high_contrast_black_or_white_in_both_previews(self):
         self.window.show()
@@ -361,12 +361,31 @@ class MainWindowTests(unittest.TestCase):
         for tab, preview in enumerate((self.window.index_preview, self.window.manuscript_preview)):
             self.window.preview_tabs.setCurrentIndex(tab)
             self.app.processEvents()
-            selections = preview.extraSelections()
-            self.assertEqual(selections[0].format.foreground().color().name(), "#000000")
-            self.assertEqual(selections[0].format.background().color().name(), "#ffee00")
-            self.assertEqual(selections[0].cursor.selectedText(), "N1 M06 T1")
-            self.assertFalse(selections[0].format.boolProperty(QTextFormat.Property.FullWidthSelection))
+            self.assertEqual(preview._markers[1].number, 1)
+            self.assertEqual(preview._markers[1].color, "#ffee00")
+            self.assertEqual(len(preview.extraSelections()), 0)
             self.assertGreaterEqual(contrast_ratio(QColor("#000000"), QColor("#ffee00")), 7.0)
+
+    def test_group_marker_preserves_syntax_colors(self):
+        self.window.select_file(str(self.program))
+        preview = self.window.index_preview
+        number = self.window._preview_sources[preview].index(1)
+        before = [
+            item.format.foreground().color().name()
+            for item in preview.document().findBlockByNumber(number).layout().formats()
+        ]
+        with patch("MASTERCAM_MAIN.QInputDialog.getText", return_value=("Holes", True)):
+            with patch("MASTERCAM_MAIN.choose_group_color", return_value="#ffee00"):
+                self.window.new_group()
+        self.window._selected_lines = {1}
+        self.window.assign_selected()
+        number = self.window._preview_sources[preview].index(1)
+        after = [
+            item.format.foreground().color().name()
+            for item in preview.document().findBlockByNumber(number).layout().formats()
+        ]
+        self.assertTrue(before)
+        self.assertEqual(after, before)
 
     def test_group_highlight_covers_unicode_text_without_highlighting_line_end(self):
         self.program.write_text("N1 M06 (😀)\nN2 M01\n", encoding="utf-8")
@@ -376,11 +395,11 @@ class MainWindowTests(unittest.TestCase):
                 self.window.new_group()
         self.window._selected_lines = {0}
         self.window.assign_selected()
-        selections = self.window.index_preview.extraSelections()
-        self.assertEqual(selections[0].cursor.selectedText(), "N1 M06 (😀)")
-        self.assertFalse(selections[0].format.boolProperty(QTextFormat.Property.FullWidthSelection))
+        self.assertEqual(self.window.index_preview._markers[0].number, 1)
+        self.assertIn("N1 M06 (😀)", self.window.index_preview.toPlainText())
+        self.assertEqual(len(self.window.index_preview.extraSelections()), 0)
 
-    def test_index_group_key_only_shows_groups_used_in_current_index(self):
+    def test_index_group_key_includes_groups_assigned_outside_index(self):
         lines = read_nc_lines(self.program)
         state = HighlightGroups(
             groups=[
@@ -395,30 +414,55 @@ class MainWindowTests(unittest.TestCase):
         self.window.show()
         self.window.index_after.setValue(0)
         self.window.select_file(str(self.program))
-        self.assertTrue(self.window.index_legend.isVisible())
-        self.assertEqual(self.window.index_legend_text.toPlainText(), "Drilling")
-        cursor = self.window.index_legend_text.textCursor()
-        cursor.setPosition(1)
-        self.assertEqual(cursor.charFormat().background().color().name(), "#ffee00")
-        self.assertEqual(cursor.charFormat().foreground().color().name(), "#000000")
-
-        self.window.index_after.setValue(2)
-        self.assertEqual(
-            self.window.index_legend_text.toPlainText(), "Drilling   Finishing"
-        )
-        self.window.index_after.setValue(0)
+        text = self.window.index_preview.toPlainText()
+        self.assertIn("Drilling", text)
+        self.assertIn("Finishing", text)
+        self.assertNotIn("Unassigned", text)
+        self.assertLess(text.index("-----"), text.index("GROUP INDEX"))
+        self.assertLess(text.index("GROUP INDEX"), text.index("N1 M06"))
+        self.assertEqual(text.count("-" * 58), 2)
+        self.assertLess(text.rindex("-" * 58), text.index("N1 M06"))
         self.window.search_code.setCurrentText("G28")
-        self.assertEqual(self.window.index_legend_text.toPlainText(), "Finishing")
-        cursor = self.window.index_legend_text.textCursor()
-        cursor.setPosition(1)
-        self.assertEqual(cursor.charFormat().background().color().name(), "#283593")
-        self.assertEqual(cursor.charFormat().foreground().color().name(), "#ffffff")
+        self.assertEqual(self.window.index_preview._markers[3].number, 2)
         self.window.preview_tabs.setCurrentIndex(1)
-        self.assertFalse(self.window.index_legend.isVisible())
+        self.assertNotIn("GROUP INDEX", self.window.manuscript_preview.toPlainText())
         self.window.preview_tabs.setCurrentIndex(0)
-        self.assertTrue(self.window.index_legend.isVisible())
+        self.assertIn("GROUP INDEX", self.window.index_preview.toPlainText())
         self.window.search_code.setCurrentText("M06")
-        self.assertFalse(self.window.index_legend.isVisible())
+        self.assertIn("Finishing", self.window.index_preview.toPlainText())
+
+    def test_index_key_rows_are_spaced_one_and_a_half_lines(self):
+        self.program.write_text(
+            "N1 M06\nN2 M01\nN3\nN4\nN5\nN6\nN7\nM30\n", encoding="utf-8"
+        )
+        lines = read_nc_lines(self.program)
+        state = HighlightGroups(
+            groups=[HighlightGroup(str(i), f"Group{i}", "#ffee00") for i in range(6)],
+            assignments={i: str(i) for i in range(6)},
+            source_hash=source_hash(lines),
+        )
+        save_highlight_groups(self.program, lines, state)
+        self.window.show()
+        self.window.select_file(str(self.program))
+        self.app.processEvents()
+        preview = self.window.index_preview
+        rows = sorted(preview._key_markers)
+        self.assertEqual(len(rows), 2)
+        first = preview.document().findBlockByNumber(rows[0])
+        second = preview.document().findBlockByNumber(rows[1])
+        first_rect = preview.blockBoundingGeometry(first)
+        second_rect = preview.blockBoundingGeometry(second)
+        self.assertAlmostEqual(
+            (second_rect.top() - first_rect.top()) / first_rect.height(),
+            1.5,
+            delta=0.15,
+        )
+        spacer = preview.document().findBlockByNumber(rows[0] + 1)
+        self.assertEqual(spacer.text(), "")
+        self.assertIsNone(self.window._preview_sources[preview][spacer.blockNumber()])
+        text = preview.toPlainText()
+        self.assertLess(text.index("GROUP INDEX"), text.rindex("-" * 58))
+        self.assertLess(text.rindex("-" * 58), text.index("N1 M06"))
 
     def test_dark_group_uses_white_text_in_both_previews(self):
         self.window.select_file(str(self.program))
@@ -429,9 +473,8 @@ class MainWindowTests(unittest.TestCase):
         self.window.assign_selected()
         for tab, preview in enumerate((self.window.index_preview, self.window.manuscript_preview)):
             self.window.preview_tabs.setCurrentIndex(tab)
-            selections = preview.extraSelections()
-            self.assertEqual(selections[0].format.foreground().color().name(), "#ffffff")
-            self.assertEqual(selections[0].format.background().color().name(), "#283593")
+            self.assertEqual(preview._markers[1].color, "#283593")
+            self.assertEqual(len(preview.extraSelections()), 0)
 
     def test_existing_colors_are_converted_and_saved_once(self):
         lines = read_nc_lines(self.program)
@@ -543,8 +586,7 @@ class MainWindowTests(unittest.TestCase):
             with patch("MASTERCAM_MAIN.choose_group_color", return_value="#00ff00"):
                 self.window.edit_group()
         self.assertEqual(self.window._group_state.groups[1].name, "Slots Edited")
-        selections = self.window.index_preview.extraSelections()
-        self.assertEqual(selections[0].format.background().color().name(), "#00ff00")
+        self.assertEqual(self.window.index_preview._markers[2].color, "#00ff00")
         with patch("MASTERCAM_MAIN.QMessageBox.question", return_value=QMessageBox.StandardButton.Yes):
             self.window.delete_group()
         self.assertEqual(self.window._group_state.assignments, {})
@@ -613,7 +655,7 @@ class MainWindowTests(unittest.TestCase):
                 QTest.mouseClick(buttons["New"], Qt.MouseButton.LeftButton)
         self.click_source_line(self.window.index_preview, 2)
         QTest.mouseClick(buttons["Assign Selected"], Qt.MouseButton.LeftButton)
-        self.assertEqual(len(self.window.index_preview.extraSelections()), 1)
+        self.assertEqual(len(self.window.index_preview._markers), 1)
 
         self.window.main_splitter.setSizes([500, 600])
         self.app.processEvents()
